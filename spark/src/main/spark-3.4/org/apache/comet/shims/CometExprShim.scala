@@ -19,21 +19,29 @@
 package org.apache.comet.shims
 
 import org.apache.comet.expressions.CometEvalMode
+import org.apache.comet.serde.CommonStringExprs
+import org.apache.comet.serde.ExprOuterClass.Expr
 import org.apache.spark.sql.catalyst.expressions._
 
 /**
- * `CometExprShim` acts as a shim for for parsing expressions from different Spark versions.
+ * `CometExprShim` acts as a shim for parsing expressions from different Spark versions.
  */
-trait CometExprShim {
-    /**
-     * Returns a tuple of expressions for the `unhex` function.
-     */
-    protected def unhexSerde(unhex: Unhex): (Expression, Expression) = {
-        (unhex.child, Literal(unhex.failOnError))
-    }
-
+trait CometExprShim extends CommonStringExprs {
     protected def evalMode(c: Cast): CometEvalMode.Value =
         CometEvalModeUtil.fromSparkEvalMode(c.evalMode)
+
+    def versionSpecificExprToProtoInternal(
+        expr: Expression,
+        inputs: Seq[Attribute],
+        binding: Boolean): Option[Expr] = {
+      expr match {
+        case s: StringDecode =>
+          // Right child is the encoding expression.
+          stringDecode(expr, s.charset, s.bin, inputs, binding)
+
+        case _ => None
+      }
+    }
 }
 
 object CometEvalModeUtil {

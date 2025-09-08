@@ -29,13 +29,14 @@ name: Deploy DataFusion Comet site
 jobs:
   build-docs:
     name: Build docs
+    if: ${{ startsWith(github.repository, 'apache/') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout docs sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Checkout asf-site branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: asf-site
           path: asf-site

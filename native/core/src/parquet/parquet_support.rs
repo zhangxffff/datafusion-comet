@@ -352,20 +352,49 @@ fn parse_hdfs_url(url: &Url) -> Result<(Box<dyn ObjectStore>, Path), object_stor
     }
 }
 
-#[cfg(not(feature = "hdfs"))]
+#[cfg(feature = "hdfs-opendal")]
+fn parse_hdfs_url(url: &Url) -> Result<(Box<dyn ObjectStore>, Path), object_store::Error> {
+    let name_node = get_name_node_uri(url)?;
+    let builder = opendal::services::Hdfs::default().name_node(&name_node);
+
+    let op = opendal::Operator::new(builder)
+        .map_err(|error| object_store::Error::Generic {
+            store: "hdfs-opendal",
+            source: error.into(),
+        })?
+        .finish();
+    let store = object_store_opendal::OpendalStore::new(op);
+    let path = Path::parse(url.path())?;
+    Ok((Box::new(store), path))
+}
+
+#[cfg(feature = "hdfs-opendal")]
+fn get_name_node_uri(url: &Url) -> Result<String, object_store::Error> {
+    use std::fmt::Write;
+    if let Some(host) = url.host() {
+        let schema = url.scheme();
+        let mut uri_builder = String::new();
+        write!(&mut uri_builder, "{schema}://{host}").unwrap();
+
+        if let Some(port) = url.port() {
+            write!(&mut uri_builder, ":{port}").unwrap();
+        }
+        Ok(uri_builder)
+    } else {
+        Err(object_store::Error::InvalidPath {
+            source: object_store::path::Error::InvalidPath {
+                path: std::path::PathBuf::from(url.as_str()),
+            },
+        })
+    }
+}
+
+#[cfg(all(not(feature = "hdfs"), not(feature = "hdfs-opendal")))]
 fn parse_hdfs_url(_url: &Url) -> Result<(Box<dyn ObjectStore>, Path), object_store::Error> {
     Err(object_store::Error::Generic {
         store: "HadoopFileSystem",
         source: "Hdfs support is not enabled in this build".into(),
     })
-}
-
-/// Parses the url, registers the object store, and returns a tuple of the object store url and object store path
-pub(crate) fn prepare_object_store(
-    runtime_env: Arc<RuntimeEnv>,
-    url: String,
-) -> Result<(ObjectStoreUrl, Path), ExecutionError> {
-    prepare_object_store_with_configs(runtime_env, url, &HashMap::new())
 }
 
 /// Parses the url, registers the object store with configurations, and returns a tuple of the object store url
@@ -406,12 +435,22 @@ pub(crate) fn prepare_object_store_with_configs(
 
 #[cfg(test)]
 mod tests {
-    use crate::parquet::parquet_support::prepare_object_store;
+    use crate::execution::operators::ExecutionError;
+    use crate::parquet::parquet_support::prepare_object_store_with_configs;
     use datafusion::execution::object_store::ObjectStoreUrl;
     use datafusion::execution::runtime_env::RuntimeEnv;
     use object_store::path::Path;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use url::Url;
+
+    /// Parses the url, registers the object store, and returns a tuple of the object store url and object store path
+    pub(crate) fn prepare_object_store(
+        runtime_env: Arc<RuntimeEnv>,
+        url: String,
+    ) -> Result<(ObjectStoreUrl, Path), ExecutionError> {
+        prepare_object_store_with_configs(runtime_env, url, &HashMap::new())
+    }
 
     #[cfg(not(feature = "hdfs"))]
     #[test]

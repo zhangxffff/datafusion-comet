@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::execution::operators::copy_array;
 use crate::{
     errors::CometError,
     execution::{
@@ -80,6 +81,8 @@ pub struct ScanExec {
     jvm_fetch_time: Time,
     /// Time spent in FFI
     arrow_ffi_time: Time,
+    /// Whether native code can assume ownership of batches that it receives
+    arrow_ffi_safe: bool,
 }
 
 impl ScanExec {
@@ -88,6 +91,7 @@ impl ScanExec {
         input_source: Option<Arc<GlobalRef>>,
         input_source_description: &str,
         data_types: Vec<DataType>,
+        arrow_ffi_safe: bool,
     ) -> Result<Self, CometError> {
         let metrics_set = ExecutionPlanMetricsSet::default();
         let baseline_metrics = BaselineMetrics::new(&metrics_set, 0);
@@ -108,6 +112,7 @@ impl ScanExec {
                 data_types.len(),
                 &jvm_fetch_time,
                 &arrow_ffi_time,
+                arrow_ffi_safe,
             )?;
             timer.stop();
             batch
@@ -138,6 +143,7 @@ impl ScanExec {
             jvm_fetch_time,
             arrow_ffi_time,
             schema,
+            arrow_ffi_safe,
         })
     }
 
@@ -186,6 +192,7 @@ impl ScanExec {
                 self.data_types.len(),
                 &self.jvm_fetch_time,
                 &self.arrow_ffi_time,
+                self.arrow_ffi_safe,
             )?;
             *current_batch = Some(next_batch);
         }
@@ -202,6 +209,7 @@ impl ScanExec {
         num_cols: usize,
         jvm_fetch_time: &Time,
         arrow_ffi_time: &Time,
+        arrow_ffi_safe: bool,
     ) -> Result<InputBatch, CometError> {
         if exec_context_id == TEST_EXEC_CONTEXT_ID {
             // This is a unit test. We don't need to call JNI.
@@ -210,8 +218,7 @@ impl ScanExec {
 
         if iter.is_null() {
             return Err(CometError::from(ExecutionError::GeneralError(format!(
-                "Null batch iterator object. Plan id: {}",
-                exec_context_id
+                "Null batch iterator object. Plan id: {exec_context_id}"
             ))));
         }
 
@@ -277,8 +284,20 @@ impl ScanExec {
             let array_data = ArrayData::from_spark((array_ptr, schema_ptr))?;
 
             // TODO: validate array input data
+            // array_data.validate_full()?;
 
-            inputs.push(make_array(array_data));
+            let array = make_array(array_data);
+
+            let array = if arrow_ffi_safe {
+                // ownership of this array has been transferred to native
+                array
+            } else {
+                // it is necessary to copy the array because the contents may be
+                // overwritten on the JVM side in the future
+                copy_array(&array)
+            };
+
+            inputs.push(array);
 
             // Drop the Arcs to avoid memory leak
             unsafe {
@@ -303,14 +322,14 @@ fn scan_schema(input_batch: &InputBatch, data_types: &[DataType]) -> SchemaRef {
                 .map(|(idx, c)| {
                     let datatype = ScanExec::unpack_dictionary_type(c.data_type());
                     // We don't use the field name. Put a placeholder.
-                    Field::new(format!("col_{}", idx), datatype, true)
+                    Field::new(format!("col_{idx}"), datatype, true)
                 })
                 .collect::<Vec<Field>>()
         }
         _ => data_types
             .iter()
             .enumerate()
-            .map(|(idx, dt)| Field::new(format!("col_{}", idx), dt.clone(), true))
+            .map(|(idx, dt)| Field::new(format!("col_{idx}"), dt.clone(), true))
             .collect(),
     };
 

@@ -20,7 +20,8 @@ use crate::utils::array_with_timezone;
 use crate::{EvalMode, SparkError, SparkResult};
 use arrow::array::builder::StringBuilder;
 use arrow::array::{DictionaryArray, StringArray, StructArray};
-use arrow::datatypes::{DataType, Schema};
+use arrow::compute::can_cast_types;
+use arrow::datatypes::{ArrowDictionaryKeyType, ArrowNativeType, DataType, Schema};
 use arrow::{
     array::{
         cast::AsArray,
@@ -31,8 +32,8 @@ use arrow::{
     },
     compute::{cast_with_options, take, unary, CastOptions},
     datatypes::{
-        ArrowPrimitiveType, Decimal128Type, DecimalType, Float32Type, Float64Type, Int64Type,
-        TimestampMicrosecondType,
+        is_validate_decimal_precision, ArrowPrimitiveType, Decimal128Type, Float32Type,
+        Float64Type, Int64Type, TimestampMicrosecondType,
     },
     error::ArrowError,
     record_batch::RecordBatch,
@@ -40,7 +41,8 @@ use arrow::{
 };
 use chrono::{DateTime, NaiveDate, TimeZone, Timelike};
 use datafusion::common::{
-    cast::as_generic_string_array, internal_err, Result as DataFusionResult, ScalarValue,
+    cast::as_generic_string_array, internal_err, DataFusionError, Result as DataFusionResult,
+    ScalarValue,
 };
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::ColumnarValue;
@@ -679,7 +681,7 @@ macro_rules! cast_decimal_to_int16_down {
         let cast_array = $array
             .as_any()
             .downcast_ref::<Decimal128Array>()
-            .expect(concat!("Expected a Decimal128ArrayType"));
+            .expect("Expected a Decimal128ArrayType");
 
         let output_array = match $eval_mode {
             EvalMode::Ansi => cast_array
@@ -742,7 +744,7 @@ macro_rules! cast_decimal_to_int32_up {
         let cast_array = $array
             .as_any()
             .downcast_ref::<Decimal128Array>()
-            .expect(concat!("Expected a Decimal128ArrayType"));
+            .expect("Expected a Decimal128ArrayType");
 
         let output_array = match $eval_mode {
             EvalMode::Ansi => cast_array
@@ -812,6 +814,8 @@ pub struct SparkCastOptions {
     /// We also use the cast logic for adapting Parquet schemas, so this flag is used
     /// for that use case
     pub is_adapting_schema: bool,
+    /// String to use to represent null values
+    pub null_string: String,
 }
 
 impl SparkCastOptions {
@@ -822,6 +826,7 @@ impl SparkCastOptions {
             allow_incompat,
             allow_cast_unsigned_ints: false,
             is_adapting_schema: false,
+            null_string: "null".to_string(),
         }
     }
 
@@ -832,6 +837,7 @@ impl SparkCastOptions {
             allow_incompat,
             allow_cast_unsigned_ints: false,
             is_adapting_schema: false,
+            null_string: "null".to_string(),
         }
     }
 }
@@ -860,6 +866,40 @@ pub fn spark_cast(
             Ok(ColumnarValue::Scalar(scalar))
         }
     }
+}
+
+// copied from datafusion common scalar/mod.rs
+fn dict_from_values<K: ArrowDictionaryKeyType>(
+    values_array: ArrayRef,
+) -> datafusion::common::Result<ArrayRef> {
+    // Create a key array with `size` elements of 0..array_len for all
+    // non-null value elements
+    let key_array: PrimitiveArray<K> = (0..values_array.len())
+        .map(|index| {
+            if values_array.is_valid(index) {
+                let native_index = K::Native::from_usize(index).ok_or_else(|| {
+                    DataFusionError::Internal(format!(
+                        "Can not create index of type {} from value {}",
+                        K::DATA_TYPE,
+                        index
+                    ))
+                })?;
+                Ok(Some(native_index))
+            } else {
+                Ok(None)
+            }
+        })
+        .collect::<datafusion::common::Result<Vec<_>>>()?
+        .into_iter()
+        .collect();
+
+    // create a new DictionaryArray
+    //
+    // Note: this path could be made faster by using the ArrayData
+    // APIs and skipping validation, if it every comes up in
+    // performance traces.
+    let dict_array = DictionaryArray::<K>::try_new(key_array, values_array)?;
+    Ok(Arc::new(dict_array))
 }
 
 fn cast_array(
@@ -891,18 +931,33 @@ fn cast_array(
                 .downcast_ref::<DictionaryArray<Int32Type>>()
                 .expect("Expected a dictionary array");
 
-            let casted_dictionary = DictionaryArray::<Int32Type>::new(
-                dict_array.keys().clone(),
-                cast_array(Arc::clone(dict_array.values()), to_type, cast_options)?,
-            );
-
             let casted_result = match to_type {
-                Dictionary(_, _) => Arc::new(casted_dictionary.clone()),
-                _ => take(casted_dictionary.values().as_ref(), dict_array.keys(), None)?,
+                Dictionary(_, to_value_type) => {
+                    let casted_dictionary = DictionaryArray::<Int32Type>::new(
+                        dict_array.keys().clone(),
+                        cast_array(Arc::clone(dict_array.values()), to_value_type, cast_options)?,
+                    );
+                    Arc::new(casted_dictionary.clone())
+                }
+                _ => {
+                    let casted_dictionary = DictionaryArray::<Int32Type>::new(
+                        dict_array.keys().clone(),
+                        cast_array(Arc::clone(dict_array.values()), to_type, cast_options)?,
+                    );
+                    take(casted_dictionary.values().as_ref(), dict_array.keys(), None)?
+                }
             };
             return Ok(spark_cast_postprocess(casted_result, &from_type, to_type));
         }
-        _ => array,
+        _ => {
+            if let Dictionary(_, _) = to_type {
+                let dict_array = dict_from_values::<Int32Type>(array)?;
+                let casted_result = cast_array(dict_array, to_type, cast_options)?;
+                return Ok(spark_cast_postprocess(casted_result, &from_type, to_type));
+            } else {
+                array
+            }
+        }
     };
     let from_type = array.data_type();
     let eval_mode = cast_options.eval_mode;
@@ -956,6 +1011,7 @@ fn cast_array(
         {
             spark_cast_nonintegral_numeric_to_integral(&array, eval_mode, from_type, to_type)
         }
+        (Utf8View, Utf8) => Ok(cast_with_options(&array, to_type, &CAST_OPTIONS)?),
         (Struct(_), Utf8) => Ok(casts_struct_to_string(array.as_struct(), cast_options)?),
         (Struct(_), Struct(_)) => Ok(cast_struct_to_struct(
             array.as_struct(),
@@ -963,6 +1019,9 @@ fn cast_array(
             to_type,
             cast_options,
         )?),
+        (List(_), List(_)) if can_cast_types(from_type, to_type) => {
+            Ok(cast_with_options(&array, to_type, &CAST_OPTIONS)?)
+        }
         (UInt8 | UInt16 | UInt32 | UInt64, Int8 | Int16 | Int32 | Int64)
             if cast_options.allow_cast_unsigned_ints =>
         {
@@ -1013,7 +1072,7 @@ fn is_datafusion_spark_compatible(
         DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
             // note that the cast from Int32/Int64 -> Decimal128 here is actually
             // not compatible with Spark (no overflow checks) but we have tests that
-            // rely on this cast working so we have to leave it here for now
+            // rely on this cast working, so we have to leave it here for now
             matches!(
                 to_type,
                 DataType::Boolean
@@ -1141,7 +1200,7 @@ fn casts_struct_to_string(
                     str.push_str(", ");
                 }
                 if field.is_null(row_index) {
-                    str.push_str("null");
+                    str.push_str(&spark_cast_options.null_string);
                 } else {
                     str.push_str(field.value(row_index));
                 }
@@ -1283,38 +1342,25 @@ where
     for i in 0..input.len() {
         if input.is_null(i) {
             cast_array.append_null();
-        } else {
-            let input_value = input.value(i).as_();
-            let value = (input_value * mul).round().to_i128();
-
-            match value {
-                Some(v) => {
-                    if Decimal128Type::validate_decimal_precision(v, precision).is_err() {
-                        if eval_mode == EvalMode::Ansi {
-                            return Err(SparkError::NumericValueOutOfRange {
-                                value: input_value.to_string(),
-                                precision,
-                                scale,
-                            });
-                        } else {
-                            cast_array.append_null();
-                        }
-                    }
-                    cast_array.append_value(v);
-                }
-                None => {
-                    if eval_mode == EvalMode::Ansi {
-                        return Err(SparkError::NumericValueOutOfRange {
-                            value: input_value.to_string(),
-                            precision,
-                            scale,
-                        });
-                    } else {
-                        cast_array.append_null();
-                    }
-                }
-            }
+            continue;
         }
+
+        let input_value = input.value(i).as_();
+        if let Some(v) = (input_value * mul).round().to_i128() {
+            if is_validate_decimal_precision(v, precision) {
+                cast_array.append_value(v);
+                continue;
+            }
+        };
+
+        if eval_mode == EvalMode::Ansi {
+            return Err(SparkError::NumericValueOutOfRange {
+                value: input_value.to_string(),
+                precision,
+                scale,
+            });
+        }
+        cast_array.append_null();
     }
 
     let res = Arc::new(
@@ -2199,6 +2245,7 @@ mod tests {
     use arrow::array::StringArray;
     use arrow::datatypes::TimestampMicrosecondType;
     use arrow::datatypes::{Field, Fields, TimeUnit};
+    use core::f64;
     use std::str::FromStr;
 
     use super::*;
@@ -2666,5 +2713,43 @@ mod tests {
         } else {
             unreachable!()
         }
+    }
+
+    #[test]
+    // Currently the cast function depending on `f64::powi`, which has unspecified precision according to the doc
+    // https://doc.rust-lang.org/std/primitive.f64.html#unspecified-precision.
+    // Miri deliberately apply random floating-point errors to these operations to expose bugs
+    // https://github.com/rust-lang/miri/issues/4395.
+    // The random errors may interfere with test cases at rounding edge, so we ignore it on miri for now.
+    // Once https://github.com/apache/datafusion-comet/issues/1371 is fixed, this should no longer be an issue.
+    #[cfg_attr(miri, ignore)]
+    fn test_cast_float_to_decimal() {
+        let a: ArrayRef = Arc::new(Float64Array::from(vec![
+            Some(42.),
+            Some(0.5153125),
+            Some(-42.4242415),
+            Some(42e-314),
+            Some(0.),
+            Some(-4242.424242),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+            Some(f64::NAN),
+            None,
+        ]));
+        let b =
+            cast_floating_point_to_decimal128::<Float64Type>(&a, 8, 6, EvalMode::Legacy).unwrap();
+        assert_eq!(b.len(), a.len());
+        let casted = b.as_primitive::<Decimal128Type>();
+        assert_eq!(casted.value(0), 42000000);
+        // https://github.com/apache/datafusion-comet/issues/1371
+        // assert_eq!(casted.value(1), 515313);
+        assert_eq!(casted.value(2), -42424242);
+        assert_eq!(casted.value(3), 0);
+        assert_eq!(casted.value(4), 0);
+        assert!(casted.is_null(5));
+        assert!(casted.is_null(6));
+        assert!(casted.is_null(7));
+        assert!(casted.is_null(8));
+        assert!(casted.is_null(9));
     }
 }

@@ -201,6 +201,114 @@ class CometExecSuite extends CometTestBase {
     }
   }
 
+  test("Sort on array of boolean") {
+    withSQLConf(
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true",
+      SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key -> "false",
+      CometConf.COMET_EXEC_ENABLED.key -> "true",
+      CometConf.COMET_EXEC_SHUFFLE_ENABLED.key -> "true",
+      CometConf.COMET_SHUFFLE_MODE.key -> "jvm") {
+
+      sql("""
+          |CREATE OR REPLACE TEMPORARY VIEW test_list AS SELECT * FROM VALUES
+          | (array(true)),
+          | (array(false)),
+          | (array(false)),
+          | (array(false)) AS test(arr)
+          |""".stripMargin)
+
+      val df = sql("""
+          SELECT * FROM test_list ORDER BY arr
+          |""".stripMargin)
+      val sort = stripAQEPlan(df.queryExecution.executedPlan).collect { case s: CometSortExec =>
+        s
+      }.headOption
+      assert(sort.isDefined)
+    }
+  }
+
+  test("Sort on TimestampNTZType") {
+    withSQLConf(
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true",
+      SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key -> "false",
+      CometConf.COMET_EXEC_ENABLED.key -> "true",
+      CometConf.COMET_EXEC_SHUFFLE_ENABLED.key -> "true",
+      CometConf.COMET_SHUFFLE_MODE.key -> "jvm") {
+
+      sql("""
+          |CREATE OR REPLACE TEMPORARY VIEW test_list AS SELECT * FROM VALUES
+          | (TIMESTAMP_NTZ'2025-08-29 00:00:00'),
+          | (TIMESTAMP_NTZ'2023-07-07 00:00:00'),
+          | (convert_timezone('Asia/Kathmandu', 'UTC', TIMESTAMP_NTZ'2023-07-07 00:00:00')),
+          | (convert_timezone('America/Los_Angeles', 'UTC', TIMESTAMP_NTZ'2023-07-07 00:00:00')),
+          | (TIMESTAMP_NTZ'1969-12-31 00:00:00') AS test(ts_ntz)
+          |""".stripMargin)
+
+      val df = sql("""
+          SELECT * FROM test_list ORDER BY ts_ntz
+          |""".stripMargin)
+      checkSparkAnswer(df)
+      val sort = stripAQEPlan(df.queryExecution.executedPlan).collect { case s: CometSortExec =>
+        s
+      }.headOption
+      assert(sort.isDefined)
+    }
+  }
+
+  test("Sort on map w/ TimestampNTZType values") {
+    withSQLConf(
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true",
+      SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key -> "false",
+      CometConf.COMET_EXEC_ENABLED.key -> "true",
+      CometConf.COMET_EXEC_SHUFFLE_ENABLED.key -> "true",
+      CometConf.COMET_SHUFFLE_MODE.key -> "jvm") {
+
+      sql("""
+          |CREATE OR REPLACE TEMPORARY VIEW test_map AS SELECT * FROM VALUES
+          | (map('a', TIMESTAMP_NTZ'2025-08-29 00:00:00')),
+          | (map('b', TIMESTAMP_NTZ'2023-07-07 00:00:00')),
+          | (map('c', convert_timezone('Asia/Kathmandu', 'UTC', TIMESTAMP_NTZ'2023-07-07 00:00:00'))),
+          | (map('d', convert_timezone('America/Los_Angeles', 'UTC', TIMESTAMP_NTZ'2023-07-07 00:00:00'))) AS test(map)
+          |""".stripMargin)
+
+      val df = sql("""
+          SELECT * FROM test_map ORDER BY map_values(map) DESC
+          |""".stripMargin)
+      checkSparkAnswer(df)
+      val sort = stripAQEPlan(df.queryExecution.executedPlan).collect { case s: CometSortExec =>
+        s
+      }.headOption
+      assert(sort.isDefined)
+    }
+  }
+
+  test("Sort on map w/ boolean values") {
+    withSQLConf(
+      SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true",
+      SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key -> "false",
+      CometConf.COMET_EXEC_ENABLED.key -> "true",
+      CometConf.COMET_EXEC_SHUFFLE_ENABLED.key -> "true",
+      CometConf.COMET_EXEC_SORT_ENABLED.key -> "true",
+      CometConf.COMET_SHUFFLE_MODE.key -> "jvm") {
+
+      sql("""
+          |CREATE OR REPLACE TEMPORARY VIEW test_map AS SELECT * FROM VALUES
+          | (map('a', true)),
+          | (map('b', true)),
+          | (map('c', false)),
+          | (map('d', true)) AS test(map)
+          |""".stripMargin)
+
+      val df = sql("""
+          SELECT * FROM test_map ORDER BY map_values(map) DESC
+          |""".stripMargin)
+      val sort = stripAQEPlan(df.queryExecution.executedPlan).collect { case s: CometSortExec =>
+        s
+      }.headOption
+      assert(sort.isDefined)
+    }
+  }
+
   test(
     "fall back to Spark when the partition spec and order spec are not the same for window function") {
     withTempView("test") {
@@ -504,7 +612,7 @@ class CometExecSuite extends CometTestBase {
       withSQLConf(
         CometConf.COMET_EXEC_SHUFFLE_ENABLED.key -> "true",
         CometConf.COMET_SHUFFLE_MODE.key -> "jvm",
-        CometConf.COMET_CAST_ALLOW_INCOMPATIBLE.key -> "true") {
+        CometConf.COMET_EXPR_ALLOW_INCOMPATIBLE.key -> "true") {
         withParquetTable((0 until 5).map(i => (i, i + 1)), "tbl") {
           var column1 = s"CAST(max(_1) AS $subqueryType)"
           if (subqueryType == "BINARY") {
@@ -1000,6 +1108,59 @@ class CometExecSuite extends CometTestBase {
     }
   }
 
+  test("TakeOrderedAndProjectExec with positive offset") {
+    withParquetTable((0 until 50).map(i => (i, i + 42)), "tbl") {
+      val regularDfWithOffset = sql("SELECT _1, _2 FROM tbl order by _1 LIMIT 5 OFFSET 7")
+      checkSparkAnswerAndOperator(regularDfWithOffset)
+      val dfWithOffsetOnly = sql("SELECT _1, _2 FROM tbl order by _1 OFFSET 12")
+      checkSparkAnswerAndOperator(dfWithOffsetOnly)
+      val incompleteDf = sql("SELECT _1, _2 FROM tbl order by _1 LIMIT 5 OFFSET 47")
+      checkSparkAnswerAndOperator(incompleteDf)
+      val emptyDf = sql("SELECT _1, _2 FROM tbl order by _1 LIMIT 50 OFFSET 1000")
+      checkSparkAnswerAndOperator(emptyDf)
+    }
+  }
+
+  test("CollectLimitExec with positive offset") {
+    withParquetTable((0 until 50).map(i => (i, i + 12)), "tbl") {
+      // disable top-k sort to switch from TakeProjectExec to CollectLimitExec in the execution plan
+      withSQLConf(SQLConf.TOP_K_SORT_FALLBACK_THRESHOLD.key -> "0") {
+        val regularDfWithOffset = sql("SELECT _1, _2 FROM tbl order by _2 LIMIT 4 OFFSET 4")
+        checkSparkAnswerAndOperator(regularDfWithOffset)
+        val dfWithOffsetOnly = sql("SELECT _1, _2 FROM tbl order by _2 OFFSET 15")
+        checkSparkAnswerAndOperator(dfWithOffsetOnly)
+        val incompleteDf = sql("SELECT _1, _2 FROM tbl order by _1 LIMIT 25 OFFSET 40")
+        checkSparkAnswerAndOperator(incompleteDf)
+        val emptyDf = sql("SELECT _1, _2 FROM tbl order by _1 LIMIT 50 OFFSET 1000")
+        checkSparkAnswerAndOperator(emptyDf)
+      }
+    }
+  }
+
+  test("GlobalLimit with positive offset") {
+    withParquetTable((0 until 50).map(i => (i, i + 13)), "tbl") {
+      val regularDfWithOffset =
+        sql("SELECT _1, _2 FROM tbl order by _2 LIMIT 4 OFFSET 1").groupBy("_1").agg(sum("_2"))
+      checkSparkAnswerAndOperator(regularDfWithOffset)
+      val dfWithOffsetOnly = sql("SELECT _1, _2 FROM tbl order by _2 OFFSET 15").agg(sum("_2"))
+      checkSparkAnswerAndOperator(dfWithOffsetOnly)
+    }
+  }
+
+  test("explicit zero limit and offset") {
+    withParquetTable((0 until 50).map(i => (i, i + 8)), "tbl") {
+      withSQLConf(
+        "spark.sql.optimizer.excludedRules" -> "org.apache.spark.sql.catalyst.optimizer.EliminateLimits") {
+        val dfWithZeroLimitAndOffsetOrdered =
+          sql("SELECT _1, _2 FROM tbl order by _2 LIMIT 0 OFFSET 0")
+        checkSparkAnswerAndOperator(dfWithZeroLimitAndOffsetOrdered)
+        val dfWithZeroLimitAndOffsetUnordered =
+          sql("SELECT _1, _2 FROM tbl LIMIT 0 OFFSET 0")
+        checkSparkAnswerAndOperator(dfWithZeroLimitAndOffsetUnordered)
+      }
+    }
+  }
+
   test("sort with dictionary") {
     withSQLConf(CometConf.COMET_BATCH_SIZE.key -> 8192.toString) {
       withTempDir { dir =>
@@ -1378,7 +1539,7 @@ class CometExecSuite extends CometTestBase {
   test("SPARK-33474: Support typed literals as partition spec values") {
     withSQLConf(
       SESSION_LOCAL_TIMEZONE.key -> "Asia/Kathmandu",
-      CometConf.COMET_CAST_ALLOW_INCOMPATIBLE.key -> "true") {
+      CometConf.COMET_EXPR_ALLOW_INCOMPATIBLE.key -> "true") {
       withTable("t1") {
         val binaryStr = "Spark SQL"
         val binaryHexStr = Hex.hex(UTF8String.fromString(binaryStr).getBytes).toString
@@ -1698,7 +1859,7 @@ class CometExecSuite extends CometTestBase {
       })
   }
 
-  test("Fallback to Spark for TakeOrderedAndProjectExec with offset") {
+  test("TakeOrderedAndProjectExec with offset") {
     Seq("true", "false").foreach(aqeEnabled =>
       withSQLConf(SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> aqeEnabled) {
         withTable("t1") {
@@ -1709,9 +1870,8 @@ class CometExecSuite extends CometTestBase {
             .repartition(3) // Force repartition to test data will come to single partition
             .write
             .saveAsTable("t1")
-
           val df = sql("SELECT * FROM t1 ORDER BY a, b LIMIT 3 OFFSET 1").groupBy($"a").sum("b")
-          checkSparkAnswer(df)
+          checkSparkAnswerAndOperator(df)
         }
       })
   }
@@ -1859,6 +2019,8 @@ class CometExecSuite extends CometTestBase {
   }
 
   test("SparkToColumnar eliminate redundant in AQE") {
+    // TODO fix for Spark 4.0.0
+    assume(!isSpark40Plus)
     withSQLConf(
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true",
       CometConf.COMET_SHUFFLE_MODE.key -> "jvm") {
@@ -2029,6 +2191,8 @@ class CometExecSuite extends CometTestBase {
   }
 
   test("SparkToColumnar override node name for row input") {
+    // TODO fix for Spark 4.0.0
+    assume(!isSpark40Plus)
     withSQLConf(
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "true",
       CometConf.COMET_SHUFFLE_MODE.key -> "jvm") {

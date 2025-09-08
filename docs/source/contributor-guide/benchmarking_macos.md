@@ -72,6 +72,17 @@ export SPARK_MASTER=spark://Rustys-MacBook-Pro.local:7077
 $SPARK_HOME/sbin/start-worker.sh $SPARK_MASTER
 ```
 
+### Start local Apache Spark cluster using `spark-class`
+For Apache Spark distributions installed using `brew` tool, it may happen there is no `$SPARK_HOME/sbin` folder on your machine. 
+In order to start local Apache Spark cluster on `localhost:7077` port, run: 
+```shell
+$SPARK_HOME/bin/spark-class org.apache.spark.deploy.master.Master --host 127.0.0.1 --port 7077 --webui-port 8080
+```
+
+Once master has started, in separate console start the worker referring the spark master uri on `localhost:7077`
+```shell
+$SPARK_HOME/bin/spark-class org.apache.spark.deploy.worker.Worker --cores 8 --memory 16G spark://localhost:7077
+```
 
 ## Run Spark Benchmarks
 
@@ -133,7 +144,7 @@ $SPARK_HOME/bin/spark-submit \
     --conf spark.comet.exec.shuffle.enableFastEncoding=true \
     --conf spark.comet.exec.shuffle.fallbackToColumnar=true \
     --conf spark.comet.exec.replaceSortMergeJoin=true \
-    --conf spark.comet.cast.allowIncompatible=true \
+    --conf spark.comet.expression.allowIncompatible=true \
     /path/to/datafusion-benchmarks/runners/datafusion-comet/tpcbench.py \
     --benchmark tpch \
     --data /path/to/tpch-data/ \

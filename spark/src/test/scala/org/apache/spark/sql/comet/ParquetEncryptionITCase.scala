@@ -30,11 +30,11 @@ import org.scalatest.Tag
 import org.scalatestplus.junit.JUnitRunner
 
 import org.apache.spark.{DebugFilesystem, SparkConf}
-import org.apache.spark.sql.{CometTestBase, SparkSession, SQLContext}
+import org.apache.spark.sql.{CometTestBase, SQLContext}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SQLTestUtils
 
-import org.apache.comet.{CometConf, CometSparkSessionExtensions, IntegrationTestSuite}
+import org.apache.comet.{CometConf, IntegrationTestSuite}
 
 /**
  * A integration test suite that tests parquet modular encryption usage.
@@ -49,7 +49,8 @@ class ParquetEncryptionITCase extends CometTestBase with SQLTestUtils {
   private val key2 = encoder.encodeToString("1234567890123451".getBytes(StandardCharsets.UTF_8))
 
   test("SPARK-34990: Write and read an encrypted parquet") {
-    assume(CometConf.COMET_NATIVE_SCAN_IMPL.get() == CometConf.SCAN_NATIVE_COMET)
+    assume(CometConf.COMET_NATIVE_SCAN_IMPL.get() != CometConf.SCAN_NATIVE_DATAFUSION)
+    assume(CometConf.COMET_NATIVE_SCAN_IMPL.get() != CometConf.SCAN_NATIVE_ICEBERG_COMPAT)
 
     import testImplicits._
 
@@ -92,7 +93,8 @@ class ParquetEncryptionITCase extends CometTestBase with SQLTestUtils {
   }
 
   test("SPARK-37117: Can't read files in Parquet encryption external key material mode") {
-    assume(CometConf.COMET_NATIVE_SCAN_IMPL.get() == CometConf.SCAN_NATIVE_COMET)
+    assume(CometConf.COMET_NATIVE_SCAN_IMPL.get() != CometConf.SCAN_NATIVE_DATAFUSION)
+    assume(CometConf.COMET_NATIVE_SCAN_IMPL.get() != CometConf.SCAN_NATIVE_ICEBERG_COMPAT)
 
     import testImplicits._
 
@@ -138,13 +140,8 @@ class ParquetEncryptionITCase extends CometTestBase with SQLTestUtils {
     conf
   }
 
-  protected override def createSparkSession: SparkSession = {
-    SparkSession
-      .builder()
-      .config(sparkConf)
-      .master("local[1]")
-      .withExtensions(new CometSparkSessionExtensions)
-      .getOrCreate()
+  protected override def createSparkSession: SparkSessionType = {
+    createSparkSessionWithExtensions(sparkConf)
   }
 
   override protected def test(testName: String, testTags: Tag*)(testFun: => Any)(implicit
@@ -166,8 +163,8 @@ class ParquetEncryptionITCase extends CometTestBase with SQLTestUtils {
     super.beforeAll()
   }
 
-  private var _spark: SparkSession = _
-  protected implicit override def spark: SparkSession = _spark
+  private var _spark: SparkSessionType = _
+  protected implicit override def spark: SparkSessionType = _spark
   protected implicit override def sqlContext: SQLContext = _spark.sqlContext
 
   /**

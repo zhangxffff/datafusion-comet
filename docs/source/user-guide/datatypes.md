@@ -17,27 +17,4 @@
   under the License.
 -->
 
-# Supported Spark Data Types
-
-The following Spark data types are currently available:
-
-<!-- based on org.apache.comet.serde.QueryPlanSerde.supportedDataType -->
-
-- Primitives
-  - Boolean
-  - Byte
-  - Short
-  - Integer
-  - Long
-  - Float
-  - Double
-- String
-- Binary
-- Decimal
-- Temporal
-  - Date
-  - Timestamp
-  - TimestampNTZ
-- Null
-- Struct
-- Array
+This page has moved [here](latest/datatypes.md).

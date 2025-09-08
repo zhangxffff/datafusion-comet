@@ -15,15 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::utils::{is_valid_decimal_precision, unlikely};
+use crate::utils::{build_bool_state, is_valid_decimal_precision};
 use arrow::array::{
     cast::AsArray, types::Decimal128Type, Array, ArrayRef, BooleanArray, Decimal128Array,
 };
 use arrow::datatypes::{DataType, Field, FieldRef};
-use arrow::{
-    array::BooleanBufferBuilder,
-    buffer::{BooleanBuffer, NullBuffer},
-};
+use arrow::{array::BooleanBufferBuilder, buffer::NullBuffer};
 use datafusion::common::{DataFusionError, Result as DFResult, ScalarValue};
 use datafusion::logical_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion::logical_expr::Volatility::Immutable;
@@ -210,7 +207,10 @@ impl Accumulator for SumDecimalAccumulator {
         //      are null, in this case we'll return null
         //   2. if `is_empty` is false, but `null_state` is true, it means there's an overflow. In
         //      non-ANSI mode Spark returns null.
-        if self.is_empty || !self.is_not_null {
+        if self.is_empty
+            || !self.is_not_null
+            || !is_valid_decimal_precision(self.sum, self.precision)
+        {
             ScalarValue::new_primitive::<Decimal128Type>(
                 None,
                 &DataType::Decimal128(self.precision, self.scale),
@@ -287,24 +287,16 @@ impl SumDecimalGroupsAccumulator {
         !self.is_empty.get_bit(index) && !self.is_not_null.get_bit(index)
     }
 
+    #[inline]
     fn update_single(&mut self, group_index: usize, value: i128) {
-        if unlikely(self.is_overflow(group_index)) {
-            // This means there's a overflow in decimal, so we will just skip the rest
-            // of the computation
-            return;
-        }
-
         self.is_empty.set_bit(group_index, false);
         let (new_sum, is_overflow) = self.sum[group_index].overflowing_add(value);
+        self.sum[group_index] = new_sum;
 
         if is_overflow || !is_valid_decimal_precision(new_sum, self.precision) {
             // Overflow: set buffer accumulator to null
             self.is_not_null.set_bit(group_index, false);
-            return;
         }
-
-        self.sum[group_index] = new_sum;
-        self.is_not_null.set_bit(group_index, true)
     }
 }
 
@@ -312,25 +304,6 @@ fn ensure_bit_capacity(builder: &mut BooleanBufferBuilder, capacity: usize) {
     if builder.len() < capacity {
         let additional = capacity - builder.len();
         builder.append_n(additional, true);
-    }
-}
-
-/// Build a boolean buffer from the state and reset the state, based on the emit_to
-/// strategy.
-fn build_bool_state(state: &mut BooleanBufferBuilder, emit_to: &EmitTo) -> BooleanBuffer {
-    let bool_state: BooleanBuffer = state.finish();
-
-    match emit_to {
-        EmitTo::All => bool_state,
-        EmitTo::First(n) => {
-            // split off the first N values in bool_state
-            let first_n_bools: BooleanBuffer = bool_state.iter().take(*n).collect();
-            // reset the existing seen buffer
-            for seen in bool_state.iter().skip(*n) {
-                state.append(seen);
-            }
-            first_n_bools
-        }
     }
 }
 
@@ -375,11 +348,17 @@ impl GroupsAccumulator for SumDecimalGroupsAccumulator {
         //      are null, in this case we'll return null
         //   2. if `is_empty` is false, but `null_state` is true, it means there's an overflow. In
         //      non-ANSI mode Spark returns null.
+        let result = emit_to.take_needed(&mut self.sum);
+        result.iter().enumerate().for_each(|(i, &v)| {
+            if !is_valid_decimal_precision(v, self.precision) {
+                self.is_not_null.set_bit(i, false);
+            }
+        });
+
         let nulls = build_bool_state(&mut self.is_not_null, &emit_to);
         let is_empty = build_bool_state(&mut self.is_empty, &emit_to);
         let x = (!&is_empty).bitand(&nulls);
 
-        let result = emit_to.take_needed(&mut self.sum);
         let result = Decimal128Array::new(result.into(), Some(NullBuffer::new(x)))
             .with_data_type(self.result_type.clone());
 

@@ -103,8 +103,18 @@ object CometConf extends ShimCometConf {
     .checkValues(
       Set(SCAN_NATIVE_COMET, SCAN_NATIVE_DATAFUSION, SCAN_NATIVE_ICEBERG_COMPAT, SCAN_AUTO))
     .createWithDefault(sys.env
-      .getOrElse("COMET_PARQUET_SCAN_IMPL", SCAN_NATIVE_COMET)
+      .getOrElse("COMET_PARQUET_SCAN_IMPL", SCAN_AUTO)
       .toLowerCase(Locale.ROOT))
+
+  val COMET_RESPECT_PARQUET_FILTER_PUSHDOWN: ConfigEntry[Boolean] =
+    conf("spark.comet.parquet.respectFilterPushdown")
+      .doc(
+        "Whether to respect Spark's PARQUET_FILTER_PUSHDOWN_ENABLED config. This needs to be " +
+          "respected when running the Spark SQL test suite but the default setting " +
+          "results in poor performance in Comet when using the new native scans, " +
+          "disabled by default")
+      .booleanConf
+      .createWithDefault(false)
 
   val COMET_PARQUET_PARALLEL_IO_ENABLED: ConfigEntry[Boolean] =
     conf("spark.comet.parquet.read.parallel.io.enabled")
@@ -472,6 +482,13 @@ object CometConf extends ShimCometConf {
       .booleanConf
       .createWithDefault(false)
 
+  val COMET_LOG_FALLBACK_REASONS: ConfigEntry[Boolean] =
+    conf("spark.comet.logFallbackReasons.enabled")
+      .doc("When this setting is enabled, Comet will log warnings for all fallback reasons.")
+      .booleanConf
+      .createWithDefault(
+        sys.env.getOrElse("ENABLE_COMET_LOG_FALLBACK_REASONS", "false").toBoolean)
+
   val COMET_EXPLAIN_FALLBACK_ENABLED: ConfigEntry[Boolean] =
     conf("spark.comet.explainFallback.enabled")
       .doc(
@@ -584,15 +601,6 @@ object CometConf extends ShimCometConf {
       .toSequence
       .createWithDefault(Seq("Range,InMemoryTableScan"))
 
-  val COMET_ANSI_MODE_ENABLED: ConfigEntry[Boolean] = conf("spark.comet.ansi.enabled")
-    .internal()
-    .doc(
-      "Comet does not respect ANSI mode in most cases and by default will not accelerate " +
-        "queries when ansi mode is enabled. Enable this setting to test Comet's experimental " +
-        "support for ANSI mode. This should not be used in production.")
-    .booleanConf
-    .createWithDefault(COMET_ANSI_MODE_ENABLED_DEFAULT)
-
   val COMET_CASE_CONVERSION_ENABLED: ConfigEntry[Boolean] =
     conf("spark.comet.caseConversion.enabled")
       .doc(
@@ -613,14 +621,6 @@ object CometConf extends ShimCometConf {
     conf("spark.comet.expression.allowIncompatible")
       .doc(
         "Comet is not currently fully compatible with Spark for all expressions. " +
-          s"Set this config to true to allow them anyway. $COMPAT_GUIDE.")
-      .booleanConf
-      .createWithDefault(false)
-
-  val COMET_CAST_ALLOW_INCOMPATIBLE: ConfigEntry[Boolean] =
-    conf("spark.comet.cast.allowIncompatible")
-      .doc(
-        "Comet is not currently fully compatible with Spark for all cast operations. " +
           s"Set this config to true to allow them anyway. $COMPAT_GUIDE.")
       .booleanConf
       .createWithDefault(false)

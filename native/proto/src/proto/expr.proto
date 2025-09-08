@@ -21,6 +21,9 @@ syntax = "proto3";
 
 package spark.spark_expression;
 
+import "literal.proto";
+import "types.proto";
+
 option java_package = "org.apache.comet.serde";
 
 // The basic message representing a Spark expression.
@@ -45,15 +48,11 @@ message Expr {
     BinaryExpr or = 18;
     SortOrder sort_order = 19;
     Substring substring = 20;
-    UnaryExpr string_space = 21;
     Hour hour = 22;
     Minute minute = 23;
     Second second = 24;
     CheckOverflow check_overflow = 25;
     BinaryExpr like = 26;
-    BinaryExpr startsWith = 27;
-    BinaryExpr endsWith = 28;
-    BinaryExpr contains = 29;
     BinaryExpr rlike = 30;
     ScalarFunc scalarFunc = 31;
     BinaryExpr eqNullSafe = 32;
@@ -82,6 +81,11 @@ message Expr {
     GetArrayStructFields get_array_struct_fields = 57;
     ArrayInsert array_insert = 58;
     MathExpr integral_divide = 59;
+    ToPrettyString to_pretty_string = 60;
+    Rand rand = 61;
+    Rand randn = 62;
+    EmptyExpr spark_partition_id = 63;
+    EmptyExpr monotonically_increasing_id = 64;
   }
 }
 
@@ -111,13 +115,13 @@ enum StatisticsType {
 }
 
 message Count {
-   repeated Expr children = 1;
+  repeated Expr children = 1;
 }
 
 message Sum {
-   Expr child = 1;
-   DataType datatype = 2;
-   bool fail_on_error = 3;
+  Expr child = 1;
+  DataType datatype = 2;
+  bool fail_on_error = 3;
 }
 
 message Min {
@@ -200,37 +204,17 @@ message BloomFilterAgg {
   DataType datatype = 4;
 }
 
-message Literal {
-  oneof value {
-    bool bool_val = 1;
-    // Protobuf doesn't provide int8 and int16, we put them into int32 and convert
-    // to int8 and int16 when deserializing.
-    int32 byte_val = 2;
-    int32 short_val = 3;
-    int32 int_val = 4;
-    int64 long_val = 5;
-    float float_val = 6;
-    double double_val = 7;
-    string string_val = 8;
-    bytes bytes_val = 9;
-    bytes decimal_val = 10;
-   }
-
-   DataType datatype = 11;
-   bool is_null = 12;
+enum EvalMode {
+  LEGACY = 0;
+  TRY = 1;
+  ANSI = 2;
 }
 
 message MathExpr {
   Expr left = 1;
   Expr right = 2;
-  bool fail_on_error = 3;
   DataType return_type = 4;
-}
-
-enum EvalMode {
-  LEGACY = 0;
-  TRY = 1;
-  ANSI = 2;
+  EvalMode eval_mode = 5;
 }
 
 message Cast {
@@ -248,6 +232,9 @@ message BinaryExpr {
 
 message UnaryExpr {
   Expr child = 1;
+}
+
+message EmptyExpr {
 }
 
 // Bound to a particular vector array in input batch.
@@ -280,6 +267,11 @@ message ToJson {
   string timestamp_format = 4;
   string timestamp_ntz_format = 5;
   bool ignore_null_fields = 6;
+}
+
+message ToPrettyString {
+  Expr child = 1;
+  string timezone = 2;
 }
 
 message Hour {
@@ -411,59 +403,6 @@ message ArrayJoin {
   Expr null_replacement_expr = 3;
 }
 
-message DataType {
-  enum DataTypeId {
-    BOOL = 0;
-    INT8 = 1;
-    INT16 = 2;
-    INT32 = 3;
-    INT64 = 4;
-    FLOAT = 5;
-    DOUBLE = 6;
-    STRING = 7;
-    BYTES = 8;
-    TIMESTAMP = 9;
-    DECIMAL = 10;
-    TIMESTAMP_NTZ = 11;
-    DATE = 12;
-    NULL = 13;
-    LIST = 14;
-    MAP = 15;
-    STRUCT = 16;
-  }
-  DataTypeId type_id = 1;
-
-  message DataTypeInfo {
-    oneof datatype_struct {
-      DecimalInfo decimal = 2;
-      ListInfo list = 3;
-      MapInfo map = 4;
-      StructInfo struct = 5;
-    }
-  }
-
-  message DecimalInfo {
-    int32 precision = 1;
-    int32 scale = 2;
-  }
-
-  message ListInfo {
-    DataType element_type = 1;
-    bool contains_null = 2;
-  }
-
-  message MapInfo {
-    DataType key_type = 1;
-    DataType value_type = 2;
-    bool value_contains_null = 3;
-  }
-
-  message StructInfo {
-    repeated string field_names = 1;
-    repeated DataType field_datatypes = 2;
-    repeated bool field_nullable = 3;
-  }
-
-  DataTypeInfo type_info = 2;
+message Rand {
+  int64 seed = 1;
 }
-

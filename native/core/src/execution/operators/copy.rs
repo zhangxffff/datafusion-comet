@@ -31,7 +31,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use arrow::error::ArrowError;
 use datafusion::common::{arrow_datafusion_err, DataFusionError, Result as DataFusionResult};
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::execution_plan::{Boundedness, CardinalityEffect, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::{execution::TaskContext, physical_expr::*, physical_plan::*};
 
@@ -90,6 +90,14 @@ impl CopyExec {
             metrics: ExecutionPlanMetricsSet::default(),
             mode,
         }
+    }
+
+    pub fn input(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.input
+    }
+
+    pub fn mode(&self) -> &CopyMode {
+        &self.mode
     }
 }
 
@@ -162,6 +170,18 @@ impl ExecutionPlan for CopyExec {
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metrics.clone_inner())
     }
+
+    fn maintains_input_order(&self) -> Vec<bool> {
+        vec![true; self.children().len()]
+    }
+
+    fn supports_limit_pushdown(&self) -> bool {
+        true
+    }
+
+    fn cardinality_effect(&self) -> CardinalityEffect {
+        CardinalityEffect::Equal
+    }
 }
 
 struct CopyStream {
@@ -225,7 +245,7 @@ impl RecordBatchStream for CopyStream {
 }
 
 /// Copy an Arrow Array
-fn copy_array(array: &dyn Array) -> ArrayRef {
+pub(crate) fn copy_array(array: &dyn Array) -> ArrayRef {
     let capacity = array.len();
     let data = array.to_data();
 

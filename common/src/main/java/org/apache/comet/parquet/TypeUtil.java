@@ -31,9 +31,16 @@ import org.apache.spark.sql.types.*;
 
 import org.apache.comet.CometConf;
 
+import static org.apache.comet.parquet.Utils.descriptorToParquetColumnSpec;
+
 public class TypeUtil {
 
-  /** Converts the input Spark 'field' into a Parquet column descriptor. */
+  /**
+   * Converts the input Spark 'field' into a Parquet column descriptor.
+   *
+   * @deprecated since 0.10.0, will be removed in 0.11.0.
+   * @see <a href="https://github.com/apache/datafusion-comet/issues/2079">Comet Issue #2079</a>
+   */
   public static ColumnDescriptor convertToParquet(StructField field) {
     Type.Repetition repetition;
     int maxDefinitionLevel;
@@ -74,7 +81,8 @@ public class TypeUtil {
       builder = Types.primitive(PrimitiveType.PrimitiveTypeName.INT64, repetition);
     } else if (type == DataTypes.BinaryType) {
       builder = Types.primitive(PrimitiveType.PrimitiveTypeName.BINARY, repetition);
-    } else if (type == DataTypes.StringType) {
+    } else if (type == DataTypes.StringType
+        || (type.sameType(DataTypes.StringType) && isSpark40Plus())) {
       builder =
           Types.primitive(PrimitiveType.PrimitiveTypeName.BINARY, repetition)
               .as(LogicalTypeAnnotation.stringType());
@@ -102,6 +110,10 @@ public class TypeUtil {
     }
 
     return new ColumnDescriptor(path, builder.named(field.name()), 0, maxDefinitionLevel);
+  }
+
+  public static ParquetColumnSpec convertToParquetSpec(StructField field) {
+    return descriptorToParquetColumnSpec(convertToParquet(field));
   }
 
   /**
@@ -198,6 +210,13 @@ public class TypeUtil {
             || sparkType == DataTypes.BinaryType
             || canReadAsBinaryDecimal(descriptor, sparkType)) {
           return;
+        }
+
+        if (sparkType.sameType(DataTypes.StringType) && isSpark40Plus()) {
+          LogicalTypeAnnotation lta = descriptor.getPrimitiveType().getLogicalTypeAnnotation();
+          if (lta instanceof LogicalTypeAnnotation.StringLogicalTypeAnnotation) {
+            return;
+          }
         }
         break;
       case FIXED_LEN_BYTE_ARRAY:
@@ -314,7 +333,7 @@ public class TypeUtil {
         && ((IntLogicalTypeAnnotation) logicalTypeAnnotation).getBitWidth() == bitWidth;
   }
 
-  private static boolean isSpark40Plus() {
+  static boolean isSpark40Plus() {
     return package$.MODULE$.SPARK_VERSION().compareTo("4.0") >= 0;
   }
 }
